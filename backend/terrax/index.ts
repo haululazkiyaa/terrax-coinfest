@@ -1,0 +1,374 @@
+import { v4 as uuidv4 } from "uuid";
+import { Canister, ic, None, query, Result, Some, bool,StableBTreeMap, text, update, Vec } from "azle";
+
+import { ErrorResponse, Property, PropertyHistory, PropertyParams, PropertyPayload, User, UserPayload } from "./types";
+import { dummyProperties } from "./dummy";
+
+const usersStore = StableBTreeMap<text, User>(1);
+const propertiesStore = StableBTreeMap<text, Property>(10);
+
+export default Canister({
+  /**
+   * Query function to retrieve the principal ID of the current authenticated user.
+   * @returns Result<string, ErrorResponse> - Returns the principal ID if the query is successful, else returns an error response.
+   */
+  whoAmI: query([], text, () => {
+    return ic.caller().toString();
+  }),
+
+  /**
+   * Function to connect or authenticate a user.
+   * @returns Result<User, ErrorResponse> - Returns the user information if authentication is successful, else returns an error response.
+   */
+  connectUser: update([], Result(User, ErrorResponse), () => {
+    try {
+      if (isAnonymous()) {
+        return Result.Err(generateAnonymousError());
+      }
+
+      const userOpt = usersStore.get(ic.caller().toString());
+      if ("None" in userOpt) {
+        const newUser: User = {
+          id: ic.caller().toString(),
+          principal: ic.caller(),
+          isRegistered: false,
+          createdAt: Some(ic.time()),
+          updatedAt: Some(ic.time()),
+          name: None,
+          email: None,
+          address: None,
+          birth: None,
+          phone: None,
+          idCardImageURL: None,
+          profileImageURL: None,
+        };
+  
+        usersStore.insert(newUser.id, newUser);
+        return Result.Ok(newUser);
+      }
+      return Result.Ok(userOpt.Some);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+
+  /**
+   * Function to register a user.
+   * @param UserPayload - UserPayload containing user registration details.
+   * @returns Result<User, ErrorResponse> - Returns the registered user information if successful, else returns an error response.
+   */
+  registerUser: update([UserPayload], Result(User, ErrorResponse), (payload) => {
+    try {
+      if (isAnonymous()) {
+        return Result.Err(generateAnonymousError());
+      }
+
+      const userOpt = usersStore.get(ic.caller().toString());
+
+      if ("None" in userOpt) {
+        return Result.Err({
+          code: 404,
+          message: "Principal not registered",
+        });
+      }
+      const user = userOpt.Some;
+      if (user.isRegistered) {
+        return Result.Err({
+          code: 409,
+          message: "User already registered",
+        });
+      }
+
+      const newUser: User = {
+        id: user.id,
+        isRegistered: true,
+        principal: ic.caller(),
+        createdAt: Some(ic.time()),
+        updatedAt: Some(ic.time()),
+
+        // Payload
+        name: Some(payload.name),
+        email: Some(payload.email),
+        address: Some(payload.address),
+        birth: Some(payload.birth),
+        phone: Some(payload.phone),
+        idCardImageURL: Some(payload.idCardImageURL),
+        profileImageURL: payload.profileImageURL,
+      };
+
+      usersStore.insert(user.id, newUser);
+      return Result.Ok(newUser);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+
+  /**
+   * Function to get a user by principal ID.
+   * @returns Result<User, ErrorResponse> - Returns the user information if found, else returns an error response.
+   */
+  getUserByPrincipal: query([], Result(User, ErrorResponse), () => {
+    try {
+      const userOpt = usersStore.get(ic.caller().toString());
+
+      if ("None" in userOpt) {
+        return Result.Err({
+          code: 404,
+          message: "User not found",
+        });
+      }
+
+      return Result.Ok(userOpt.Some);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+
+  /**
+   * Function to create a new property.
+   * @param PropertyPayload - PropertyPayload containing property details.
+   * @returns Result<Property, ErrorResponse> - Returns the created property information if successful, else returns an error response.
+   */
+  createProperty: update([PropertyPayload], Result(Property, ErrorResponse), (payload) => {
+    try {
+      if (isAnonymous()) {
+        return Result.Err(generateAnonymousError());
+      }
+
+      const userOpt = usersStore.get(ic.caller().toString());
+
+      if ("None" in userOpt) {
+        return Result.Err({
+          code: 404,
+          message: "User not found",
+        });
+      }
+      const user = userOpt.Some;
+      const newHistory: PropertyHistory = {
+        user: user,
+        startDate: ic.time(),
+      };
+
+      const newProperty: Property = {
+        id: uuidv4(),
+        owner: user,
+        history: [
+          newHistory,
+        ],
+        createdAt: ic.time(),
+        updatedAt: Some(ic.time()),
+
+        ...payload,
+      };
+
+      propertiesStore.insert(newProperty.id, newProperty);
+      return Result.Ok(newProperty);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+
+  /**
+   * Function to get a list of properties based on search parameters.
+   * @param PropertyParams - PropertyParams containing search parameters.
+   * @returns Result<Vec<Property>, ErrorResponse> - Returns a list of properties if successful, else returns an error response.
+   */
+  getProperties: query([PropertyParams], Result(Vec(Property), ErrorResponse), (params) => {
+    try {
+      const properties = propertiesStore.values();
+      const filteredProperties: Property[] = properties.filter((property) => 
+         property.name.toLowerCase().includes(params.name.toLocaleLowerCase()) && ('None' in params.category) ? true : JSON.stringify(property.category) === JSON.stringify(params.category.Some)
+      );
+
+      return Result.Ok(filteredProperties);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+  
+  /**
+   * Function to get the properties owned by the current authenticated user principal.
+   * @returns Result<Vec<Property>, ErrorResponse> - Returns a list of properties owned by the user if successful, else returns an error response.
+   */
+  getCurrentProperties: query([], Result(Vec(Property), ErrorResponse), () => {
+    try {
+      if (isAnonymous()) {
+        return Result.Err(generateAnonymousError());
+      }
+      
+      const properties = propertiesStore.values().filter((property) => property.owner.principal.toString() === ic.caller().toString());
+
+      return Result.Ok(properties);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+  
+  /**
+   * Function to get a property by its ID.
+   * @param id - Property ID.
+   * @returns Result<Property, ErrorResponse> - Returns the property information if found, else returns an error response.
+   */
+  getProperty: query([text], Result(Property, ErrorResponse), (id) => {
+    try {
+      if(!isValidUuid(id)) {
+        return Result.Err({
+          code: 400,
+          message: "Invalid property id",
+        });
+      }
+
+      const property = propertiesStore.get(id);
+
+      if('None' in property) {
+        return Result.Err({
+          code: 404,
+          message: `Property with id ${id} not found`,
+        });
+      }
+
+      return Result.Ok(property.Some);
+    } catch (err) {
+      return Result.Err({
+        code: 500,
+        message: "Internal server error with message " + err,
+      });
+    }
+  }),
+
+    /**
+   * Function to validate the certificate of a property.
+   * @param id - Property ID.
+   * @returns Result<Property, ErrorResponse> - Returns the property information if the certificate is valid, else returns an error response.
+   */
+    validateCertificate: query([text], Result(Property, ErrorResponse), (id) => {
+      try {
+        if (isAnonymous()) {
+          return Result.Err(generateAnonymousError());
+        }
+        
+        if(!isValidUuid(id)) {
+          return Result.Err({
+            code: 400,
+            message: "Invalid property id",
+          });
+        }
+  
+        const property = propertiesStore.get(id);
+  
+        if('None' in property) {
+          return Result.Err({
+            code: 404,
+            message: `Property not found`,
+          });
+        }
+  
+        if(property.Some.owner.principal.toString() !== ic.caller().toString()) {
+          return Result.Err({
+            code: 403,
+            message: `Caller isn't the property's principal`,
+          });
+        }
+  
+        return Result.Ok(property.Some);
+      } catch (err) {
+        return Result.Err({
+          code: 500,
+          message: "Internal server error with message " + err,
+        });
+      }
+    }),
+
+  // This is for development testing only
+  generateDummyProperties: update([], text, () => {
+    const newUser: User = {
+      id: uuidv4(),
+      isRegistered: true,
+      principal: ic.caller(),
+      createdAt: Some(ic.time()),
+      updatedAt: Some(ic.time()),
+      name: Some("Indra Mahesa"),
+      email: Some("indramahesa128@gmail.com"),
+      address: Some("St. Sydney"),
+      birth: Some(ic.time()),
+      phone: Some("08123123123"),
+      idCardImageURL: Some("https://firebasestorage.googleapis.com/v0/b/terrax-de163.appspot.com/o/files%2Fimages%2Fprofile%2Fesmzy-hk4t2-4qkuj-ipdey-hrl3x-47uww-oll23-juhfz-aahnt-i4f6d-lae.jpeg?alt=media&token=4a1a0a9e-f310-4a91-8811-316000fe5704"),
+      profileImageURL: Some("https://firebasestorage.googleapis.com/v0/b/terrax-de163.appspot.com/o/files%2Fimages%2Fprofile%2Fesmzy-hk4t2-4qkuj-ipdey-hrl3x-47uww-oll23-juhfz-aahnt-i4f6d-lae.jpeg?alt=media&token=4a1a0a9e-f310-4a91-8811-316000fe5704"),
+    };
+
+    usersStore.insert(newUser.id, newUser);
+
+    const newHistory: PropertyHistory = {
+      user: newUser,
+      startDate: ic.time(),
+    };
+
+    dummyProperties.forEach((row) => {
+        const newProperty: Property = {
+          id: uuidv4(),
+          owner: newUser,
+          history: [
+            newHistory,
+          ],
+          createdAt: ic.time(),
+          updatedAt: Some(ic.time()),
+          
+          name: row.name,
+          description: row.description,
+          price: row.price,
+          image: row.image,
+          category: row.category,
+          bedroom: row.bedroom,
+          bathroom: row.bathroom,
+          dining: row.dining,
+          livingRoom: row.livingRoom,
+          groundFloor: row.groundFloor,
+          firstFloor: row.firstFloor,
+          secondFloor: row.secondFloor,
+          construtionArea: row.construtionArea,
+          address: row.address,
+          latitude: row.latitude,
+          longitude: row.longitude,
+        };
+
+        propertiesStore.insert(newProperty.id, newProperty);
+    });
+
+    return "Success";
+  }),
+});
+
+
+function isAnonymous() : bool {
+  return ic.caller().isAnonymous()
+}
+function generateAnonymousError() : ErrorResponse {
+  return {
+    code: 403,
+    message: "Anonymous is not allowed",
+  };
+}
+
+// Helper function to ensure the input id meets the format used for ids generated by uuid
+function isValidUuid(id: string): boolean {
+  const regexExp = /^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$/gi;
+  return regexExp.test(id);
+}
